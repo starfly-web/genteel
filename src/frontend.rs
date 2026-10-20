@@ -112,6 +112,192 @@ pub fn key_to_button(key: &Key, mapping: InputMapping) -> Option<(&'static str, 
         },
     }
 }
+/// Keys offered in the "Input Mapping" window: (stored winit name, display label).
+#[cfg(any(feature = "gui", feature = "test_headless"))]
+static NAMED_BINDABLE: &[(&str, &str)] = &[
+    ("ArrowUp", "Up Arrow"),
+    ("ArrowDown", "Down Arrow"),
+    ("ArrowLeft", "Left Arrow"),
+    ("ArrowRight", "Right Arrow"),
+    ("Space", "Space"),
+    ("Enter", "Enter"),
+    ("Tab", "Tab"),
+    ("F1", "F1"), ("F2", "F2"), ("F3", "F3"), ("F4", "F4"),
+    ("F6", "F6"), ("F7", "F7"),
+    ("F9", "F9"), ("F10", "F10"), ("F11", "F11"), ("F12", "F12"),
+    ("ShiftLeft", "Left Shift"), ("ShiftRight", "Right Shift"),
+    ("ControlLeft", "Left Ctrl"), ("ControlRight", "Right Ctrl"),
+    ("AltLeft", "Left Alt"), ("AltRight", "Right Alt"),
+    ("Comma", ", (Comma)"), ("Period", ". (Period)"), ("Slash", "/ (Slash)"),
+    ("Semicolon", "; (Semicolon)"), ("Quote", "' (Quote)"),
+    ("Minus", "- (Minus)"), ("Equal", "= (Equal)"), ("Backquote", "` (Backquote)"),
+    ("BracketLeft", "[ (L Bracket)"), ("BracketRight", "] (R Bracket)"),
+    ("Numpad0", "Numpad 0"), ("Numpad1", "Numpad 1"), ("Numpad2", "Numpad 2"),
+    ("Numpad3", "Numpad 3"), ("Numpad4", "Numpad 4"), ("Numpad5", "Numpad 5"),
+    ("Numpad6", "Numpad 6"), ("Numpad7", "Numpad 7"), ("Numpad8", "Numpad 8"),
+    ("Numpad9", "Numpad 9"), ("NumpadEnter", "Numpad Enter"),
+    ("Insert", "Insert"), ("Delete", "Delete"), ("Home", "Home"), ("End", "End"),
+    ("PageUp", "Page Up"), ("PageDown", "Page Down"),
+];
+
+/// Full list of bindable keys: letters, digits, and NAMED_BINDABLE.
+/// (F5/F8/Escape are excluded: save-state, load-state, quit.)
+#[cfg(any(feature = "gui", feature = "test_headless"))]
+pub fn bindable_keys() -> Vec<(String, String)> {
+    let mut keys: Vec<(String, String)> = Vec::with_capacity(36 + NAMED_BINDABLE.len());
+    for i in 0..26u8 {
+        let ch = (b'A' + i) as char;
+        keys.push((format!("Key{ch}"), ch.to_string()));
+    }
+    for i in 0..10 {
+        keys.push((format!("Digit{i}"), i.to_string()));
+    }
+    for (stored, display) in NAMED_BINDABLE {
+        keys.push((stored.to_string(), display.to_string()));
+    }
+    keys
+}
+
+/// Map a stored key name back to a winit KeyCode.
+#[cfg(any(feature = "gui", feature = "test_headless"))]
+pub fn key_name_to_keycode(name: &str) -> Option<KeyCode> {
+    if let Some(rest) = name.strip_prefix("Key") {
+        if rest.len() == 1 {
+            let b = rest.as_bytes()[0];
+            if b.is_ascii_uppercase() {
+                const LETTERS: [KeyCode; 26] = [
+                    KeyCode::KeyA, KeyCode::KeyB, KeyCode::KeyC, KeyCode::KeyD, KeyCode::KeyE,
+                    KeyCode::KeyF, KeyCode::KeyG, KeyCode::KeyH, KeyCode::KeyI, KeyCode::KeyJ,
+                    KeyCode::KeyK, KeyCode::KeyL, KeyCode::KeyM, KeyCode::KeyN, KeyCode::KeyO,
+                    KeyCode::KeyP, KeyCode::KeyQ, KeyCode::KeyR, KeyCode::KeyS, KeyCode::KeyT,
+                    KeyCode::KeyU, KeyCode::KeyV, KeyCode::KeyW, KeyCode::KeyX, KeyCode::KeyY,
+                    KeyCode::KeyZ,
+                ];
+                return Some(LETTERS[(b - b'A') as usize]);
+            }
+        }
+    }
+    if let Some(rest) = name.strip_prefix("Digit") {
+        if rest.len() == 1 {
+            let b = rest.as_bytes()[0];
+            if b.is_ascii_digit() {
+                const DIGITS: [KeyCode; 10] = [
+                    KeyCode::Digit0, KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3,
+                    KeyCode::Digit4, KeyCode::Digit5, KeyCode::Digit6, KeyCode::Digit7,
+                    KeyCode::Digit8, KeyCode::Digit9,
+                ];
+                return Some(DIGITS[(b - b'0') as usize]);
+            }
+        }
+    }
+    use winit::keyboard::KeyCode as K;
+    let code = match name {
+        "ArrowUp" => K::ArrowUp,
+        "ArrowDown" => K::ArrowDown,
+        "ArrowLeft" => K::ArrowLeft,
+        "ArrowRight" => K::ArrowRight,
+        "Space" => K::Space,
+        "Enter" => K::Enter,
+        "Tab" => K::Tab,
+        "F1" => K::F1, "F2" => K::F2, "F3" => K::F3, "F4" => K::F4,
+        "F6" => K::F6, "F7" => K::F7,
+        "F9" => K::F9, "F10" => K::F10, "F11" => K::F11, "F12" => K::F12,
+        "ShiftLeft" => K::ShiftLeft,
+        "ShiftRight" => K::ShiftRight,
+        "ControlLeft" => K::ControlLeft,
+        "ControlRight" => K::ControlRight,
+        "AltLeft" => K::AltLeft,
+        "AltRight" => K::AltRight,
+        "Comma" => K::Comma,
+        "Period" => K::Period,
+        "Slash" => K::Slash,
+        "Semicolon" => K::Semicolon,
+        "Quote" => K::Quote,
+        "Minus" => K::Minus,
+        "Equal" => K::Equal,
+        "Backquote" => K::Backquote,
+        "BracketLeft" => K::BracketLeft,
+        "BracketRight" => K::BracketRight,
+        "Numpad0" => K::Numpad0, "Numpad1" => K::Numpad1, "Numpad2" => K::Numpad2,
+        "Numpad3" => K::Numpad3, "Numpad4" => K::Numpad4, "Numpad5" => K::Numpad5,
+        "Numpad6" => K::Numpad6, "Numpad7" => K::Numpad7, "Numpad8" => K::Numpad8,
+        "Numpad9" => K::Numpad9,
+        "NumpadEnter" => K::NumpadEnter,
+        "Insert" => K::Insert,
+        "Delete" => K::Delete,
+        "Home" => K::Home,
+        "End" => K::End,
+        "PageUp" => K::PageUp,
+        "PageDown" => K::PageDown,
+        _ => return None,
+    };
+    Some(code)
+}
+
+
+
+/// Map a pressed KeyCode back to its stored key name.
+#[cfg(any(feature = "gui", feature = "test_headless"))]
+pub fn keycode_to_key_name(keycode: KeyCode) -> Option<String> {
+    use winit::keyboard::KeyCode as K;
+    if (K::KeyA..=K::KeyZ).contains(&keycode) {
+        let ch = (b'A' + (keycode as u32 - K::KeyA as u32) as u8) as char;
+        return Some(format!("Key{ch}"));
+    }
+    if (K::Digit0..=K::Digit9).contains(&keycode) {
+        let d = keycode as u32 - K::Digit0 as u32;
+        return Some(format!("Digit{d}"));
+    }
+    NAMED_BINDABLE
+        .iter()
+        .find(|(name, _)| key_name_to_keycode(name) == Some(keycode))
+        .map(|(name, _)| name.to_string())
+}
+
+/// Resolve a custom Input-Mapping-window binding for a pressed key.
+#[cfg(any(feature = "gui", feature = "test_headless"))]
+pub fn custom_button_for_key<'a>(
+    keycode: KeyCode,
+    custom: &'a std::collections::HashMap<String, String>,
+) -> Option<&'a str> {
+    for (button, key) in custom {
+        if key_name_to_keycode(key) == Some(keycode) {
+            return Some(button.as_str());
+        }
+    }
+    None
+}
+
+/// Human-readable preset binding for a button (shown in the Input Mapping window).
+#[cfg(any(feature = "gui", feature = "test_headless"))]
+pub fn preset_key_display(button: &str, mapping: InputMapping) -> &'static str {
+    match (mapping, button) {
+        (InputMapping::Original, "up") => "Up Arrow",
+        (InputMapping::Original, "down") => "Down Arrow",
+        (InputMapping::Original, "left") => "Left Arrow",
+        (InputMapping::Original, "right") => "Right Arrow",
+        (InputMapping::Original, "a") => "Z",
+        (InputMapping::Original, "b") => "X",
+        (InputMapping::Original, "c") => "C",
+        (InputMapping::Original, "x") => "A",
+        (InputMapping::Original, "y") => "S",
+        (InputMapping::Original, "z") => "D",
+        (InputMapping::Original, "start") => "Enter",
+        (InputMapping::Original, _) => "Q",
+        (InputMapping::Ergonomic, "up") => "W / Up Arrow",
+        (InputMapping::Ergonomic, "down") => "S / Down Arrow",
+        (InputMapping::Ergonomic, "left") => "A / Left Arrow",
+        (InputMapping::Ergonomic, "right") => "D / Right Arrow",
+        (InputMapping::Ergonomic, "a") => "J",
+        (InputMapping::Ergonomic, "b") => "K",
+        (InputMapping::Ergonomic, "c") => "L",
+        (InputMapping::Ergonomic, "x") => "U",
+        (InputMapping::Ergonomic, "y") => "I",
+        (InputMapping::Ergonomic, "z") => "O",
+        (InputMapping::Ergonomic, "start") => "Enter",
+        (InputMapping::Ergonomic, _) => "Space",
+    }
+}
 
 /// Lookup table for RGB565 to RGBA8 conversion
 static RGB565_TO_RGBA8_LUT: LazyLock<[u32; 65536]> = LazyLock::new(|| {

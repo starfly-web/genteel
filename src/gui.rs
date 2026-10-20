@@ -78,6 +78,9 @@ pub struct WindowState {
 pub struct GuiState {
     pub windows: HashMap<String, WindowState>,
     pub input_mapping: InputMapping,
+    /// Per-button key overrides ("button" -> winit key name). Empty = preset layout.
+    #[serde(default)]
+    pub custom_keymap: HashMap<String, String>,
     pub integer_scaling: bool,
     pub force_red: bool,
     pub paused: bool,
@@ -233,6 +236,7 @@ impl GuiState {
         let mut state = Self {
             windows: HashMap::new(),
             input_mapping,
+            custom_keymap: HashMap::new(),
             integer_scaling: true,
             force_red: false,
             paused: false,
@@ -280,6 +284,7 @@ impl GuiState {
     fn register_default_windows(&mut self) {
         let defaults = [
             "Settings",
+            "Input Mapping",
             "Performance & Debug",
             "M68k Status",
             "Z80 Status",
@@ -648,6 +653,7 @@ impl Framework {
         self.render_about_window();
         self.render_performance_debug_window(debug_info);
         self.render_settings_window();
+        self.render_input_mapping_window();
         self.render_execution_control_window();
         self.render_m68k_status_window(debug_info);
         self.render_z80_status_window(debug_info);
@@ -757,8 +763,8 @@ impl Framework {
                         self.gui_state.set_window_open("Settings", true);
                         ui.close_menu();
                     }
-                    if ui.button("Input Mapping").clicked() {
-                        self.gui_state.set_window_open("Settings", true);
+                    if ui.button("Input Mapping...").clicked() {
+                        self.gui_state.set_window_open("Input Mapping", true);
                         ui.close_menu();
                     }
                 });
@@ -990,6 +996,87 @@ impl Framework {
             if !open {
                 self.gui_state.set_window_open("Settings", false);
             }
+        }
+    }
+
+    fn render_input_mapping_window(&mut self) {
+        if !self.gui_state.is_window_open("Input Mapping") {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("Input Mapping")
+            .open(&mut open)
+            .default_width(300.0)
+            .show(&self.egui_ctx, |ui| {
+                ui.label("Choose the keyboard key for each controller button.");
+                ui.label("Entries showing '(preset)' use the active layout preset;");
+                ui.label("custom entries override the preset. Esc always quits.");
+                ui.separator();
+                let buttons = [
+                    ("up", "D-pad Up"),
+                    ("down", "D-pad Down"),
+                    ("left", "D-pad Left"),
+                    ("right", "D-pad Right"),
+                    ("a", "A"),
+                    ("b", "B"),
+                    ("c", "C"),
+                    ("x", "X (6-button)"),
+                    ("y", "Y (6-button)"),
+                    ("z", "Z (6-button)"),
+                    ("start", "Start"),
+                    ("mode", "Mode"),
+                ];
+                let key_options = frontend::bindable_keys();
+                for (button, label) in buttons {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{label:>14}:"));
+                        let current = self.gui_state.custom_keymap.get(button).cloned();
+                        let preset =
+                            frontend::preset_key_display(button, self.gui_state.input_mapping);
+                        let mut sel = current.clone();
+                        let selected_text = match &sel {
+                            Some(k) => key_options
+                                .iter()
+                                .find(|(n, _)| n == k)
+                                .map(|(_, d)| d.clone())
+                                .unwrap_or_else(|| k.clone()),
+                            None => format!("{preset} (preset)"),
+                        };
+                        egui::ComboBox::from_id_source(format!("keymap_{button}"))
+                            .selected_text(selected_text)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut sel, None, format!("{preset} (preset)"));
+                                for (name, display) in &key_options {
+                                    ui.selectable_value(
+                                        &mut sel,
+                                        Some(name.clone()),
+                                        display.clone(),
+                                    );
+                                }
+                            });
+                        if sel != current {
+                            match &sel {
+                                Some(k) => {
+                                    self.gui_state
+                                        .custom_keymap
+                                        .insert(button.to_string(), k.clone());
+                                }
+                                None => {
+                                    self.gui_state.custom_keymap.remove(button);
+                                }
+                            }
+                            self.gui_state.save();
+                        }
+                    });
+                }
+                ui.separator();
+                if ui.button("Reset All to Preset").clicked() {
+                    self.gui_state.custom_keymap.clear();
+                    self.gui_state.save();
+                }
+            });
+        if !open {
+            self.gui_state.set_window_open("Input Mapping", false);
         }
     }
 
@@ -2270,7 +2357,15 @@ fn handle_keyboard_input(
             framework.handle_exit(emulator, record_path);
             return true;
         }
-        if let Some((button, _)) = frontend::keycode_to_button(keycode, emulator.input_mapping) {
+        // Custom keymap (Input Mapping window) takes precedence over presets
+        if let Some(button) =
+            frontend::custom_button_for_key(keycode, &framework.gui_state.custom_keymap)
+        {
+            input.p1.set_button(button, pressed);
+            handled = true;
+        } else if let Some((button, _)) =
+            frontend::keycode_to_button(keycode, emulator.input_mapping)
+        {
             input.p1.set_button(button, pressed);
             handled = true;
         }
