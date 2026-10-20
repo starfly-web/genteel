@@ -108,6 +108,11 @@ AI agents working on this project can:
 - **Perform targeted testing**: Test specific functionality
 - **Fuzzing**: Generate random inputs to test robustness
 - **Analyze game states**: Read emulator memory to analyze internal state
+- **Drive the running emulator over HTTP**: Launch with `--api [port]` and use
+  the JSON/HTTP API to read/write registers & memory, single-step or run frames,
+  disassemble M68k code, manage breakpoints, inject input, capture the
+  framebuffer, and save/load state. See `docs/api.md` and the ready-to-use
+  client in `clients/python/genteel_client.py`.
 
 ---
 

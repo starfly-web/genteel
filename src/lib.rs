@@ -3,6 +3,7 @@
 //!
 //! This library provides the core emulation components for the Genesis.
 
+pub mod api;
 pub mod apu;
 pub mod audio;
 pub mod cpu;

@@ -7,6 +7,7 @@ macro_rules! println_safe {
         let _ = writeln!(std::io::stdout(), $($arg)*);
     }};
 }
+pub mod api;
 pub mod apu;
 pub mod audio;
 pub mod cpu;
@@ -1209,6 +1210,144 @@ impl Emulator {
         }
         Ok(())
     }
+    // ---------------------------------------------------------------------
+    // Agent-facing JSON/HTTP API
+    // ---------------------------------------------------------------------
+
+    /// Build the full machine-state JSON snapshot used by `/state`,
+    /// `/step`, `/registers`, etc.
+    fn api_state_json(&self) -> serde_json::Value {
+        use serde_json::json;
+        let sr = self.cpu.sr;
+        let ccr = json!({
+            "c": (sr & cpu::flags::CARRY) != 0,
+            "v": (sr & cpu::flags::OVERFLOW) != 0,
+            "z": (sr & cpu::flags::ZERO) != 0,
+            "n": (sr & cpu::flags::NEGATIVE) != 0,
+            "x": (sr & cpu::flags::EXTEND) != 0,
+        });
+        let interrupt_mask = (sr & cpu::flags::INTERRUPT_MASK) >> 8;
+        json!({
+            "registers": {
+                "d0": format!("0x{:08X}", self.cpu.d[0]),
+                "d1": format!("0x{:08X}", self.cpu.d[1]),
+                "d2": format!("0x{:08X}", self.cpu.d[2]),
+                "d3": format!("0x{:08X}", self.cpu.d[3]),
+                "d4": format!("0x{:08X}", self.cpu.d[4]),
+                "d5": format!("0x{:08X}", self.cpu.d[5]),
+                "d6": format!("0x{:08X}", self.cpu.d[6]),
+                "d7": format!("0x{:08X}", self.cpu.d[7]),
+                "a0": format!("0x{:08X}", self.cpu.a[0]),
+                "a1": format!("0x{:08X}", self.cpu.a[1]),
+                "a2": format!("0x{:08X}", self.cpu.a[2]),
+                "a3": format!("0x{:08X}", self.cpu.a[3]),
+                "a4": format!("0x{:08X}", self.cpu.a[4]),
+                "a5": format!("0x{:08X}", self.cpu.a[5]),
+                "a6": format!("0x{:08X}", self.cpu.a[6]),
+                "a7": format!("0x{:08X}", self.cpu.a[7]),
+                "usp": format!("0x{:08X}", self.cpu.usp),
+                "ssp": format!("0x{:08X}", self.cpu.ssp),
+                "pc": format!("0x{:06X}", self.cpu.pc),
+                "sr": format!("0x{:04X}", sr),
+                "ccr": ccr,
+                "supervisor": (sr & cpu::flags::SUPERVISOR) != 0,
+                "interrupt_mask": interrupt_mask,
+            },
+            "z80": {
+                "pc": format!("0x{:04X}", self.z80.pc),
+                "sp": format!("0x{:04X}", self.z80.sp),
+            },
+            "frame": self.internal_frame_count,
+            "paused": self.paused,
+            "region": match self.bus.borrow().apu.region {
+                Region::Ntsc => "ntsc",
+                Region::Pal => "pal",
+            },
+        })
+    }
+
+    /// Apply register writes from an API request. Accepts either a flat
+    /// object or one nested under `"registers"`.
+    fn api_write_registers(
+        &mut self,
+        value: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let regs = value.get("registers").unwrap_or(value);
+        let get = |k: &str| regs.get(k).and_then(api_json_to_u32);
+
+        if let Some(v) = get("pc") {
+            self.cpu.pc = v & 0xFFFFFF;
+        }
+        if let Some(v) = get("sr") {
+            self.cpu.sr = (v & 0xFFFF) as u16;
+        }
+        if let Some(v) = get("usp") {
+            self.cpu.usp = v;
+        }
+        if let Some(v) = get("ssp") {
+            self.cpu.ssp = v;
+        }
+        for i in 0..8 {
+            if let Some(v) = get(&format!("d{}", i)) {
+                self.cpu.d[i] = v;
+            }
+            if let Some(v) = get(&format!("a{}", i)) {
+                self.cpu.a[i] = v;
+            }
+        }
+        Ok(self
+            .api_state_json()
+            .get("registers")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null))
+    }
+
+    /// Step a single M68k instruction (borrows the bus mutably).
+    fn api_step_instruction(&mut self) {
+        let mut bus = self.bus.borrow_mut();
+        self.cpu.step_instruction(&mut *bus);
+    }
+
+    /// Run the emulator with the agent-facing JSON/HTTP API attached.
+    ///
+    /// This is a blocking, single-threaded loop (mirroring [`Self::run_with_gdb`])
+    /// because the emulator state is `!Send`. It serves API requests on `port`
+    /// and steps the machine between requests only while "running" is enabled
+    /// via `POST /run`; otherwise the machine stays paused so an agent can
+    /// inspect and single-step deterministically.
+    pub fn run_with_api(
+        &mut self,
+        port: u16,
+        password: Option<String>,
+        bind: &str,
+    ) -> std::io::Result<()> {
+        let mut server = crate::api::ApiServer::new(port, password, bind)?;
+        server.set_nonblocking(true)?;
+        println!(
+            "🤖 Agent API ready on http://{}:{}/  — try: curl http://{}:{}/state",
+            bind,
+            server.port(),
+            bind,
+            server.port()
+        );
+        loop {
+            match server.try_accept() {
+                Ok(Some(stream)) => {
+                    // Serve this client fully (it may issue several requests).
+                    let _ = server.serve_client(stream, crate::api::handlers::dispatch, self);
+                }
+                _ => {
+                    // No client waiting: advance the machine if running.
+                    if !self.paused {
+                        self.step_frame(None);
+                    } else {
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                }
+            }
+        }
+    }
+
     pub(crate) fn log_debug(&self, frame_count: u64) {
         let bus = self.bus.borrow();
         let disp_en = if bus.vdp.display_enabled() {
@@ -1291,6 +1430,141 @@ impl Emulator {
         gui::run(self, record_path)
     }
 }
+
+/// Convert a JSON value (number or hex/decimal string) to `u32` for register
+/// writes. Reuses the API's address parser so `"0x…"`, `"$…"`, and decimals
+/// all work.
+fn api_json_to_u32(v: &serde_json::Value) -> Option<u32> {
+    match v {
+        serde_json::Value::Number(n) => n.as_u64().and_then(|x| u32::try_from(x).ok()),
+        serde_json::Value::String(s) => crate::api::handlers::parse_addr(s),
+        _ => None,
+    }
+}
+
+/// Bridge the concrete `Emulator` to the agent API's [`crate::api::EmulatorAccess`]
+/// trait so the HTTP handlers can drive it without knowing its type.
+impl crate::api::EmulatorAccess for Emulator {
+    fn read_byte(&mut self, addr: u32) -> u8 {
+        self.bus.borrow_mut().read_byte(addr)
+    }
+    fn write_byte(&mut self, addr: u32, value: u8) {
+        self.bus.borrow_mut().write_byte(addr, value);
+    }
+    fn read_word(&mut self, addr: u32) -> u16 {
+        self.bus.borrow_mut().read_word(addr)
+    }
+    fn state_json(&mut self) -> serde_json::Value {
+        self.api_state_json()
+    }
+    fn write_registers(&mut self, value: &serde_json::Value) -> Result<serde_json::Value, String> {
+        self.api_write_registers(value)
+    }
+    fn step_instruction(&mut self) {
+        self.api_step_instruction();
+    }
+    fn step_frame(&mut self) {
+        Emulator::step_frame(self, None);
+    }
+    fn set_paused(&mut self, paused: bool) {
+        self.paused = paused;
+    }
+    fn is_paused(&self) -> bool {
+        self.paused
+    }
+    fn reset(&mut self) {
+        self.hard_reset();
+    }
+    fn breakpoints(&self) -> Vec<u32> {
+        self.gdb
+            .as_ref()
+            .map(|g| g.breakpoints.iter().copied().collect())
+            .unwrap_or_default()
+    }
+    fn add_breakpoint(&mut self, addr: u32) -> bool {
+        // Lazily create a GDB server purely to hold the breakpoint set if the
+        // API is used without `--gdb`. The set is what agents care about.
+        if self.gdb.is_none() {
+            if let Ok(g) = debugger::GdbServer::new(0, None) {
+                self.gdb = Some(g);
+            }
+        }
+        match self.gdb.as_mut() {
+            Some(g) => g.breakpoints.insert(addr),
+            None => false,
+        }
+    }
+    fn remove_breakpoint(&mut self, addr: u32) -> bool {
+        match self.gdb.as_mut() {
+            Some(g) => g.breakpoints.remove(&addr),
+            None => false,
+        }
+    }
+    fn set_input(&mut self, value: &serde_json::Value) -> Result<serde_json::Value, String> {
+        let mut p1 = io::ControllerState::default();
+        for key in [
+            "up", "down", "left", "right", "a", "b", "c", "start", "x", "y", "z", "mode",
+        ] {
+            let pressed = value
+                .get(key)
+                .and_then(|v| v.as_bool())
+                .or_else(|| {
+                    value
+                        .get("buttons")
+                        .and_then(|b| b.get(key))
+                        .and_then(|v| v.as_bool())
+                })
+                .unwrap_or(false);
+            p1.set_button(key, pressed);
+        }
+        let mut bus = self.bus.borrow_mut();
+        if let Some(ctrl) = bus.io.controller(1) {
+            *ctrl = p1;
+        }
+        Ok(serde_json::json!({ "p1": p1.to_button_string() }))
+    }
+    fn framebuffer(&mut self) -> Vec<u16> {
+        self.bus.borrow().vdp.framebuffer.clone()
+    }
+    fn framebuffer_width(&self) -> u32 {
+        320
+    }
+    fn framebuffer_height(&self) -> u32 {
+        if self.bus.borrow().vdp.is_pal {
+            240
+        } else {
+            224
+        }
+    }
+    fn save_state(&mut self, path: &str) -> Result<String, String> {
+        let p = std::path::PathBuf::from(path);
+        self.save_state_to_path(p.clone());
+        Ok(p.to_string_lossy().into_owned())
+    }
+    fn load_state(&mut self, path: &str) -> Result<(), String> {
+        let p = std::path::PathBuf::from(path);
+        if !p.exists() {
+            return Err(format!("state file not found: {}", path));
+        }
+        self.load_state_from_path(p);
+        Ok(())
+    }
+    fn info(&self) -> serde_json::Value {
+        serde_json::json!({
+            "name": "genteel",
+            "api_version": 1,
+            "system": "Sega Mega Drive / Genesis",
+            "rom": self.current_rom_path.as_ref().map(|p| p.to_string_lossy().into_owned()),
+            "endpoints": [
+                "GET /info", "GET /state", "GET|POST /registers", "POST /step",
+                "POST /run", "POST /pause", "POST /reset", "GET|POST /memory",
+                "GET /disassemble", "GET|POST|DELETE /breakpoints", "POST /input",
+                "GET /framebuffer", "POST /savestate/save", "POST /savestate/load",
+            ],
+        })
+    }
+}
+
 fn print_usage() {
     println!("Genteel - Sega Genesis/Mega Drive Emulator");
     println!();
@@ -1304,6 +1578,9 @@ fn print_usage() {
     println!("  --gdb [port]     Start GDB server (default port: 1234)");
     println!("  --gdb-password <pass>  Set password for GDB server authentication");
     println!("  --gdb-password-file <path> Read GDB password from a file");
+    println!("  --api [port]     Start agent JSON/HTTP API (default port: 4545)");
+    println!("  --api-password <pass>  Require a bearer token for the agent API");
+    println!("  --api-bind <addr>    Bind address for the agent API (default: 127.0.0.1)");
     println!("  --dump-audio <file> Dump audio output to WAV file");
     println!(
         "  --input-mapping <type> Set keyboard mapping (original|ergonomic, default: original)"
@@ -1352,6 +1629,9 @@ struct Config {
     screenshot_path: Option<String>,
     gdb_port: Option<u16>,
     gdb_password: Option<String>,
+    api_port: Option<u16>,
+    api_password: Option<String>,
+    api_bind: Option<String>,
     dump_audio_path: Option<String>,
     record_path: Option<String>,
     input_mapping: InputMapping,
@@ -1422,6 +1702,27 @@ impl Config {
                     }
                     current_opt = iter.next();
                 }
+                "--api" => {
+                    let mut port = crate::api::DEFAULT_API_PORT;
+                    current_opt = iter.next();
+                    if let Some(ref next) = current_opt {
+                        if !next.starts_with('-') {
+                            if let Ok(p) = next.parse() {
+                                port = p;
+                                current_opt = iter.next(); // consume it
+                            }
+                        }
+                    }
+                    config.api_port = Some(port);
+                }
+                "--api-password" => {
+                    config.api_password = iter.next();
+                    current_opt = iter.next();
+                }
+                "--api-bind" => {
+                    config.api_bind = iter.next();
+                    current_opt = iter.next();
+                }
                 "--dump-audio" => {
                     config.dump_audio_path = iter.next();
                     current_opt = iter.next();
@@ -1472,6 +1773,9 @@ fn main() {
     let script_path = config.script_path;
     let gdb_port = config.gdb_port;
     let dump_audio_path = config.dump_audio_path;
+    let api_port = config.api_port;
+    let api_password = config.api_password;
+    let api_bind = config.api_bind.unwrap_or_else(|| "127.0.0.1".to_string());
     let mut emulator = Emulator::new();
     emulator.input_mapping = config.input_mapping;
     emulator.debug = config.debug;
@@ -1529,6 +1833,18 @@ fn main() {
                 }
             }
         }
+    }
+
+    // Agent-facing JSON/HTTP API. This is a dedicated blocking mode: the
+    // emulator serves API requests and steps the machine between them.
+    if let Some(port) = api_port {
+        // Start paused so an agent gets deterministic, inspectable state
+        // until it explicitly calls POST /run.
+        emulator.paused = true;
+        if let Err(e) = emulator.run_with_api(port, api_password, &api_bind) {
+            eprintln!("Agent API server error: {}", e);
+        }
+        return;
     }
 
     if config.headless {

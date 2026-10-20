@@ -21,9 +21,13 @@ genteel/
 │   │   └── mod.rs
 │   ├── io/               # Input/Output (controllers)
 │   │   └── mod.rs
-│   └── debugger/         # GDB RSP debugging interface
-│       └── mod.rs
-├── docs/                 # Additional documentation
+│   ├── debugger/         # GDB RSP debugging interface
+│   │   └── mod.rs
+│   └── api/              # Agent-facing JSON/HTTP API (mod.rs, handlers.rs, tests.rs)
+│       └── ...
+├── clients/              # Example API clients (python/)
+│   └── python/
+├── docs/                 # Additional documentation (incl. api.md)
 ├── scripts/              # Automation and auditing scripts
 ├── Cargo.toml            # Rust project manifest
 ├── README.md             # Project overview for humans
@@ -36,22 +40,23 @@ genteel/
 Provide a simple block diagram or a clear text-based description of the major components and their interactions.
 
 ```text
-[External Tool (e.g., Agent, GDB)] 
-       ^
-       |
-       v
+[External Tool (e.g., Agent, GDB)]
+        ^
+        |  (1) GDB Remote Serial Protocol   (2) JSON/HTTP
+        v
 [Genteel Emulator (main.rs / lib.rs)] <--> [SharedBus / MemoryInterface]
-                                                  |
-                                                  +--> [CPU (M68k)]
-                                                  |
-                                                  +--> [APU (Z80, YM2612, PSG)]
-                                                  |
-                                                  +--> [VDP (Graphics)]
-                                                  |
+        ^        ^                              |
+        |        |                              +--> [CPU (M68k)]
+        |        +-- src/api  (JSON/HTTP server)  +--> [APU (Z80, YM2612, PSG)]
+        +-- src/debugger (GDB RSP server)         +--> [VDP (Graphics)]
                                                   +--> [I/O (Controllers)]
-                                                  |
                                                   +--> [Memory (ROM, WRAM, VRAM, SRAM)]
 ```
+
+Both external interfaces are **single-threaded** and interleaved with
+emulation by the run loop, because the emulator state (`Rc<RefCell<Bus>>`) is
+`!Send`. The JSON/HTTP API ([`crate::api`]) reuses the emulator's existing
+disassembler, memory bus, and serde-serializable state; see `docs/api.md`.
 
 ## 3. Core Components
 
@@ -140,7 +145,11 @@ Code Quality Tools: `cargo clippy`, `cargo fmt`, `make audit` (custom audit scri
 
 - **M68k Implementation**: Completed full instruction set and addressing modes; fixed bugs in ADDX/SUBX/EXG.
 - **APU Implementation**: Initial Yamaha YM2612 FM and SN76489 PSG support implemented; fixed test regressions.
-- **AI Agent API**: Expanded scripting engine with memory/register manipulation commands (READ/WRITE/ASSERT).
+- **AI Agent API**: JSON/HTTP API (`src/api/`) exposing state, registers, memory
+  read/write, single-step/frame stepping, M68k disassembly (Motorola + GNU
+  syntax), breakpoints, controller input injection, framebuffer capture, and
+  savestate save/load. Enabled with `--api [port]`. See `docs/api.md` and
+  `clients/python/`.
 - **Controller Support**: 3-button and 6-button controller support implemented.
 - **GDB Support**: Basic RSP support with breakpoints and inspection implemented.
 - **Accuracy Improvements**: Moved VBlank/HBlank/LineCounter management into VDP `tick` for better cycle accuracy.
@@ -152,7 +161,7 @@ Code Quality Tools: `cargo clippy`, `cargo fmt`, `make audit` (custom audit scri
 Project Name: genteel
 Repository URL: https://github.com/segin/genteel
 Primary Contact/Team: N/A
-Date of Last Update: 2026-07-04 (audit fixes: GPGX-style envelope increment table, register-order slot offsets, algorithm 4/5/6 routing corrections, Timer B period without the doubled /16 prescaler, A1-bank-matched data-port writes replacing BUSY-gated write rejection, serde defaults for save-state compatibility, frame-pacer stall resync, audio callback 0-channel guard and DC decay. Earlier YM2612 parity work: added discrete-vs-YM3438 read-port behavior, single-data-port bank selection, profile-aware BUSY timing, corrected YM3438 BUSY wait-cycle units, deferred FNUM/block commit semantics, 42-MCLK internal-cycle YM stepping with per-channel subcycle clocking, sample-latched YM state for current-sample output and EG-tick coherence, DAC writes routed through the channel-6 sample pipeline instead of write-time blip injection, Timer B /16 cadence, profile-gated ladder coloration, profile-gated carrier quantization, wider internal phase-modulation buses, operator-time carrier masking, immediate active SSG-EG shape-write application, Genesis-style first-order Butterworth low-pass filtering on final APU output, linear final APU mixing, normalized FM/PSG blending, callback-side last-sample hold on both lock misses and stereo underruns, preserved APU filter state across unchanged timing syncs, stereo-aligned queue trimming, removal of temp-buffer sample dropping, staged non-blocking GUI audio uploads, moving emulation/audio production into the event-loop pacing path, bounded frame catch-up before redraw, PAL-aware GUI frame pacing, reference-style PM tables, and tighter SSG-EG/CSM/detune handling alongside prior region-aware APU timing updates)
+Date of Last Update: 2026-10-12 (added the agent-facing JSON/HTTP API in `src/api/`: state/registers/memory/disassemble/step/run/pause/reset/breakpoints/input/framebuffer/savestate endpoints, a dependency-free `std::net` HTTP server, an `EmulatorAccess` bridge in `main.rs`, `--api`/`--api-password`/`--api-bind` CLI flags, a Python client under `clients/python/`, and `docs/api.md`. Earlier: 2026-07-04 audit fixes: GPGX-style envelope increment table, register-order slot offsets, algorithm 4/5/6 routing corrections, Timer B period without the doubled /16 prescaler, A1-bank-matched data-port writes replacing BUSY-gated write rejection, serde defaults for save-state compatibility, frame-pacer stall resync, audio callback 0-channel guard and DC decay. Earlier YM2612 parity work: added discrete-vs-YM3438 read-port behavior, single-data-port bank selection, profile-aware BUSY timing, corrected YM3438 BUSY wait-cycle units, deferred FNUM/block commit semantics, 42-MCLK internal-cycle YM stepping with per-channel subcycle clocking, sample-latched YM state for current-sample output and EG-tick coherence, DAC writes routed through the channel-6 sample pipeline instead of write-time blip injection, Timer B /16 cadence, profile-gated ladder coloration, profile-gated carrier quantization, wider internal phase-modulation buses, operator-time carrier masking, immediate active SSG-EG shape-write application, Genesis-style first-order Butterworth low-pass filtering on final APU output, linear final APU mixing, normalized FM/PSG blending, callback-side last-sample hold on both lock misses and stereo underruns, preserved APU filter state across unchanged timing syncs, stereo-aligned queue trimming, removal of temp-buffer sample dropping, staged non-blocking GUI audio uploads, moving emulation/audio production into the event-loop pacing path, bounded frame catch-up before redraw, PAL-aware GUI frame pacing, reference-style PM tables, and tighter SSG-EG/CSM/detune handling alongside prior region-aware APU timing updates)
 
 ## 11. Glossary / Acronyms
 
