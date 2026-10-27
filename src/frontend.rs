@@ -3,6 +3,7 @@
 //! Provides cross-platform windowing, input handling, and rendering
 //! for the Genesis emulator using pure Rust libraries.
 
+use std::collections::HashMap;
 use std::sync::LazyLock;
 #[cfg(any(feature = "gui", feature = "test_headless"))]
 use winit::keyboard::{Key, KeyCode};
@@ -157,6 +158,153 @@ pub fn bindable_keys() -> Vec<(String, String)> {
     }
     keys
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SYSTEMATIC INPUT MAPPING DEBUGGER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// All controller buttons, in display order.
+#[cfg(any(feature = "gui", feature = "test_headless"))]
+pub const CONTROLLER_BUTTONS: [&str; 12] = [
+    "up", "down", "left", "right",
+    "a", "b", "c", "start",
+    "x", "y", "z", "mode",
+];
+
+/// Real-time button press tracker for the input-debug overlay.
+#[cfg(any(feature = "gui", feature = "test_headless"))]
+#[derive(Clone, Debug, Default)]
+pub struct InputDebugger {
+    /// button -> whether currently pressed
+    pub pressed: HashMap<String, bool>,
+}
+
+#[cfg(any(feature = "gui", feature = "test_headless"))]
+impl InputDebugger {
+    pub fn new() -> Self {
+        Self {
+            pressed: HashMap::new(),
+        }
+    }
+
+    pub fn set(&mut self, button: &str, pressed: bool) {
+        self.pressed.insert(button.to_string(), pressed);
+    }
+
+    pub fn is_pressed(&self, button: &str) -> bool {
+        self.pressed.get(button).copied().unwrap_or(false)
+    }
+
+    /// Buttons currently pressed (for the visual debug overlay).
+    pub fn lit_buttons(&self) -> Vec<&str> {
+        self.pressed
+            .iter()
+            .filter(|(_, pressed)| **pressed)
+            .map(|(button, _)| button.as_str())
+            .collect()
+    }
+}
+
+/// Preset stored key name for each button under a given mapping.
+#[cfg(any(feature = "gui", feature = "test_headless"))]
+fn preset_key_stored_name(button: &str, mapping: InputMapping) -> String {
+    match (mapping, button) {
+        (InputMapping::Original, "up") => "ArrowUp".to_string(),
+        (InputMapping::Original, "down") => "ArrowDown".to_string(),
+        (InputMapping::Original, "left") => "ArrowLeft".to_string(),
+        (InputMapping::Original, "right") => "ArrowRight".to_string(),
+        (InputMapping::Original, "a") => "KeyZ".to_string(),
+        (InputMapping::Original, "b") => "KeyX".to_string(),
+        (InputMapping::Original, "c") => "KeyC".to_string(),
+        (InputMapping::Original, "start") => "Enter".to_string(),
+        (InputMapping::Original, "x") => "KeyA".to_string(),
+        (InputMapping::Original, "y") => "KeyS".to_string(),
+        (InputMapping::Original, "z") => "KeyD".to_string(),
+        (InputMapping::Original, "mode") => "KeyQ".to_string(),
+        (InputMapping::Ergonomic, "up") => "KeyW".to_string(),
+        (InputMapping::Ergonomic, "down") => "KeyS".to_string(),
+        (InputMapping::Ergonomic, "left") => "KeyA".to_string(),
+        (InputMapping::Ergonomic, "right") => "KeyD".to_string(),
+        (InputMapping::Ergonomic, "a") => "KeyJ".to_string(),
+        (InputMapping::Ergonomic, "b") => "KeyK".to_string(),
+        (InputMapping::Ergonomic, "c") => "KeyL".to_string(),
+        (InputMapping::Ergonomic, "start") => "Enter".to_string(),
+        (InputMapping::Ergonomic, "x") => "KeyU".to_string(),
+        (InputMapping::Ergonomic, "y") => "KeyI".to_string(),
+        (InputMapping::Ergonomic, "z") => "KeyO".to_string(),
+        (InputMapping::Ergonomic, "mode") => "Space".to_string(),
+        _ => button.to_string(),
+    }
+}
+
+/// Unified resolver: custom keymap overrides preset layout.
+#[cfg(any(feature = "gui", feature = "test_headless"))]
+pub fn resolve_button_for_keycode(
+    keycode: KeyCode,
+    custom: &HashMap<String, String>,
+    mapping: InputMapping,
+) -> Option<String> {
+    // 1. Custom override takes precedence
+    if let Some(button) = custom_button_for_key(keycode, custom) {
+        return Some(button.to_string());
+    }
+    // 2. Fall back to preset layout
+    keycode_to_button(keycode, mapping).map(|(button, _)| button.to_string())
+}
+
+/// Detect duplicate key assignments across all 14 buttons.
+/// Returns Vec<(button_a, button_b, key_name)> for each conflict pair.
+#[cfg(any(feature = "gui", feature = "test_headless"))]
+pub fn detect_mapping_conflicts(
+    custom: &HashMap<String, String>,
+    mapping: InputMapping,
+) -> Vec<(String, String, String)> {
+    let mut resolved: Vec<(&str, String)> = Vec::with_capacity(14);
+
+    for button in CONTROLLER_BUTTONS {
+        let key = custom
+            .get(button)
+            .cloned()
+            .unwrap_or_else(|| preset_key_stored_name(button, mapping).to_string());
+        resolved.push((button, key));
+    }
+
+    let mut conflicts = Vec::new();
+    for i in 0..resolved.len() {
+        for j in (i + 1)..resolved.len() {
+            if resolved[i].1 == resolved[j].1 {
+                conflicts.push((
+                    resolved[i].0.to_string(),
+                    resolved[j].0.to_string(),
+                    resolved[i].1.clone(),
+                ));
+            }
+        }
+    }
+    conflicts
+}
+
+/// Display-friendly rendering of all conflicts for the GUI.
+#[cfg(any(feature = "gui", feature = "test_headless"))]
+pub fn format_mapping_conflicts(
+    custom: &HashMap<String, String>,
+    mapping: InputMapping,
+) -> Vec<String> {
+    let key_options = bindable_keys();
+    detect_mapping_conflicts(custom, mapping)
+        .iter()
+        .map(|(a, b, key)| {
+            let disp = key_options
+                .iter()
+                .find(|(n, _)| n == key)
+                .map(|(_, d)| d.as_str())
+                .unwrap_or(key);
+            format!("CONFLICT: “{a}” and “{b}” both map to “{disp}” ({key})")
+        })
+        .collect()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 
 /// Map a stored key name back to a winit KeyCode.
 #[cfg(any(feature = "gui", feature = "test_headless"))]
@@ -997,4 +1145,93 @@ mod tests {
             Some(("down", true))
         );
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SYSTEMATIC INPUT DEBUGGER TESTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[cfg(any(feature = "gui", feature = "test_headless"))]
+#[test]
+fn test_detect_mapping_conflicts_preset_none() {
+    use std::collections::HashMap;
+    let custom = HashMap::new();
+    let conflicts = detect_mapping_conflicts(&custom, InputMapping::Original);
+    assert!(conflicts.is_empty(), "preset Original has no conflicts");
+    let conflicts = detect_mapping_conflicts(&custom, InputMapping::Ergonomic);
+    assert!(conflicts.is_empty(), "preset Ergonomic has no conflicts");
+}
+
+#[cfg(any(feature = "gui", feature = "test_headless"))]
+#[test]
+fn test_detect_mapping_conflicts_custom_duplicate() {
+    use std::collections::HashMap;
+    let mut custom = HashMap::new();
+    custom.insert("up".to_string(), "KeyZ".to_string());
+    custom.insert("a".to_string(), "KeyZ".to_string());
+    let conflicts = detect_mapping_conflicts(&custom, InputMapping::Original);
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(conflicts[0].0, "up");
+    assert_eq!(conflicts[0].1, "a");
+    assert_eq!(conflicts[0].2, "KeyZ");
+}
+
+#[cfg(any(feature = "gui", feature = "test_headless"))]
+#[test]
+fn test_detect_mapping_conflicts_custom_no_duplicate() {
+    use std::collections::HashMap;
+    let mut custom = HashMap::new();
+    custom.insert("up".to_string(), "KeyW".to_string());
+    custom.insert("a".to_string(), "KeyJ".to_string());
+    let conflicts = detect_mapping_conflicts(&custom, InputMapping::Original);
+    assert!(conflicts.is_empty(), "distinct custom keys have no conflicts");
+}
+
+#[cfg(any(feature = "gui", feature = "test_headless"))]
+#[test]
+fn test_format_mapping_conflicts_renders() {
+    use std::collections::HashMap;
+    let mut custom = HashMap::new();
+    custom.insert("up".to_string(), "KeyZ".to_string());
+    custom.insert("a".to_string(), "KeyZ".to_string());
+    let messages = format_mapping_conflicts(&custom, InputMapping::Original);
+    assert!(!messages.is_empty());
+    assert!(messages[0].contains("up"));
+    assert!(messages[0].contains("a"));
+    assert!(messages[0].contains("KeyZ"));
+}
+
+#[cfg(any(feature = "gui", feature = "test_headless"))]
+#[test]
+fn test_input_debugger_lit_buttons() {
+    let mut dbg = InputDebugger::new();
+    assert!(dbg.lit_buttons().is_empty());
+    dbg.set("a", true);
+    dbg.set("start", true);
+    let lit: Vec<&str> = dbg.lit_buttons();
+    assert!(lit.contains(&"a"));
+    assert!(lit.contains(&"start"));
+    assert!(!lit.contains(&"b"));
+    dbg.set("a", false);
+    let lit: Vec<&str> = dbg.lit_buttons();
+    assert!(!lit.contains(&"a"));
+    assert!(lit.contains(&"start"));
+}
+
+#[cfg(any(feature = "gui", feature = "test_headless"))]
+#[test]
+fn test_resolve_button_for_keycode_custom_overrides_preset() {
+    use std::collections::HashMap;
+    let mut custom = HashMap::new();
+    custom.insert("up".to_string(), "KeyW".to_string());
+    // In Original preset, KeyW maps to nothing, but custom says up->KeyW
+    assert_eq!(
+        resolve_button_for_keycode(KeyCode::KeyW, &custom, InputMapping::Original),
+        Some("up".to_string())
+    );
+    // Preset still works for non-overridden keys
+    assert_eq!(
+        resolve_button_for_keycode(KeyCode::KeyZ, &custom, InputMapping::Original),
+        Some("a".to_string())
+    );
 }

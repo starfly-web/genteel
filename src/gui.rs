@@ -106,6 +106,16 @@ pub struct GuiState {
     pub load_requested: Option<u8>,
     #[serde(skip)]
     pub delete_state_requested: Option<u8>,
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // INPUT MAPPING DEBUGGER (runtime, not serialized)
+    // ═══════════════════════════════════════════════════════════════════════════
+    /// Which button is currently in key-capture mode (None = idle).
+    #[serde(skip)]
+    pub key_capture_button: Option<String>,
+    /// Real-time button state for the visual debug overlay.
+    #[serde(skip)]
+    pub input_debugger: frontend::InputDebugger,
 }
 
 fn frame_duration_for_region(is_pal: bool) -> std::time::Duration {
@@ -252,6 +262,8 @@ impl GuiState {
             save_requested: None,
             load_requested: None,
             delete_state_requested: None,
+            key_capture_button: None,
+            input_debugger: frontend::InputDebugger::new(),
         };
         state.register_default_windows();
         state
@@ -285,6 +297,7 @@ impl GuiState {
         let defaults = [
             "Settings",
             "Input Mapping",
+            "Input Config",
             "Performance & Debug",
             "M68k Status",
             "Z80 Status",
@@ -654,6 +667,7 @@ impl Framework {
         self.render_performance_debug_window(debug_info);
         self.render_settings_window();
         self.render_input_mapping_window();
+        self.render_input_config_window();
         self.render_execution_control_window();
         self.render_m68k_status_window(debug_info);
         self.render_z80_status_window(debug_info);
@@ -765,6 +779,10 @@ impl Framework {
                     }
                     if ui.button("Input Mapping...").clicked() {
                         self.gui_state.set_window_open("Input Mapping", true);
+                        ui.close_menu();
+                    }
+                    if ui.button("Input Config...").clicked() {
+                        self.gui_state.set_window_open("Input Config", true);
                         ui.close_menu();
                     }
                 });
@@ -1080,6 +1098,152 @@ impl Framework {
         }
     }
 
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // INPUT CONFIG — systematic key-mapping debugger
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    fn render_input_config_window(&mut self) {
+        if !self.gui_state.is_window_open("Input Config") {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("Input Config")
+            .open(&mut open)
+            .default_width(520.0)
+            .show(&self.egui_ctx, |ui| {
+                ui.heading("Keyboard Input Configuration");
+                ui.separator();
+
+                // ── Preset selector ──
+                ui.horizontal(|ui| {
+                    ui.label("Layout preset:");
+                    let mut preset = self.gui_state.input_mapping;
+                    if ui.radio_value(&mut preset, frontend::InputMapping::Original, "Original").clicked() {
+                        self.gui_state.input_mapping = preset;
+                        self.gui_state.save();
+                    }
+                    if ui.radio_value(&mut preset, frontend::InputMapping::Ergonomic, "Ergonomic").clicked() {
+                        self.gui_state.input_mapping = preset;
+                        self.gui_state.save();
+                    }
+                });
+                ui.separator();
+
+                // ── Conflict warnings ──
+                let conflicts =
+                    frontend::format_mapping_conflicts(&self.gui_state.custom_keymap, self.gui_state.input_mapping);
+                if !conflicts.is_empty() {
+                    ui.colored_label(egui::Color32::from_rgb(255, 80, 80), "⚠ Mapping conflicts:");
+                    for msg in &conflicts {
+                        ui.colored_label(egui::Color32::from_rgb(255, 120, 120), msg);
+                    }
+                    ui.separator();
+                }
+
+                // ── Per-button rows ──
+                ui.label("Click “Capture” then press a key to rebind. “(preset)” = layout default.");
+                ui.separator();
+
+                let key_options = frontend::bindable_keys();
+                for button in frontend::CONTROLLER_BUTTONS {
+                    let label = match button {
+                        "up" => "D-pad Up",
+                        "down" => "D-pad Down",
+                        "left" => "D-pad Left",
+                        "right" => "D-pad Right",
+                        "a" => "A",
+                        "b" => "B",
+                        "c" => "C",
+                        "start" => "Start",
+                        "x" => "X (6-btn)",
+                        "y" => "Y (6-btn)",
+                        "z" => "Z (6-btn)",
+                        "mode" => "Mode",
+                        _ => button,
+                    };
+                    let is_capturing = self.gui_state.key_capture_button.as_deref() == Some(button);
+                    let current = self.gui_state.custom_keymap.get(button).cloned();
+                    let preset = frontend::preset_key_display(button, self.gui_state.input_mapping);
+                    let has_custom = current.is_some();
+
+                    ui.horizontal(|ui| {
+                        // Button label + live state light
+                        let lit = self.gui_state.input_debugger.is_pressed(button);
+                        let light_color = if lit {
+                            egui::Color32::from_rgb(0, 255, 0)
+                        } else {
+                            egui::Color32::from_rgb(60, 60, 60)
+                        };
+                        ui.label(format!("{label:>14}:"));
+                        let cursor = ui.cursor();
+                        ui.painter().rect_filled(cursor, 2.0, light_color);
+                        ui.advance_cursor_after_rect(cursor);
+
+                        // Current binding text
+                        let binding_text = match &current {
+                            Some(k) => key_options
+                                .iter()
+                                .find(|(n, _)| n == k)
+                                .map(|(_, d)| d.clone())
+                                .unwrap_or_else(|| k.clone())
+                                + " (custom)",
+                            None => format!("{preset} (preset)"),
+                        };
+                        let btn_text = if is_capturing {
+                            "⌨ Press key…".to_string()
+                        } else {
+                            format!("Change [{binding_text}]")
+                        };
+                        if ui.button(btn_text).clicked() {
+                            if is_capturing {
+                                self.gui_state.key_capture_button = None;
+                            } else {
+                                self.gui_state.key_capture_button = Some(button.to_string());
+                            }
+                        }
+
+                        // Conflict indicator
+                        let conflicts = frontend::detect_mapping_conflicts(
+                            &self.gui_state.custom_keymap,
+                            self.gui_state.input_mapping,
+                        );
+                        let in_conflict = conflicts.iter().any(|(a, b, _)| {
+                            (a == button || b == button) && !a.is_empty() && !b.is_empty()
+                        });
+                        if in_conflict {
+                            ui.colored_label(egui::Color32::from_rgb(255, 80, 80), "⚠ conflict");
+                        }
+
+                        // Clear custom binding
+                        if has_custom && ui.button("✕").clicked() {
+                            self.gui_state.custom_keymap.remove(button);
+                            self.gui_state.save();
+                        }
+                    });
+                }
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        self.gui_state.save();
+                    }
+                    if ui.button("Reset All to Preset").clicked() {
+                        self.gui_state.custom_keymap.clear();
+                        self.gui_state.key_capture_button = None;
+                        self.gui_state.save();
+                    }
+                    if ui.button("Close").clicked() {
+                        self.gui_state.key_capture_button = None;
+                        self.gui_state.set_window_open("Input Config", false);
+                    }
+                });
+            });
+        if !open {
+            self.gui_state.set_window_open("Input Config", false);
+            self.gui_state.key_capture_button = None;
+        }
+    }
     fn render_execution_control_window(&mut self) {
         if self.gui_state.is_window_open("Execution Control") {
             let mut open = true;
@@ -2349,7 +2513,29 @@ fn handle_keyboard_input(
         return false;
     }
     let pressed = key_event.state == ElementState::Pressed;
-    // 1. Try physical key first
+    // KEY CAPTURE MODE — intercept next keypress to bind it
+    if let Some(capturing_button) = &framework.gui_state.key_capture_button {
+        if pressed {
+            let key_name = if let PhysicalKey::Code(keycode) = key_event.physical_key {
+                frontend::keycode_to_key_name(keycode)
+            } else {
+                None
+            };
+            if let Some(name) = key_name {
+                framework.gui_state
+                    .custom_keymap
+                    .insert(capturing_button.clone(), name);
+                framework.gui_state.key_capture_button = None;
+                framework.gui_state.save();
+                // Don't apply this key to emulation — it was consumed by capture
+                return false;
+            }
+        }
+        // If not a physical key or not pressed, still consume the event during capture
+        return false;
+    }
+
+    // 1. Try physical key first — unified resolver (custom > preset)
     let mut handled = false;
     if let PhysicalKey::Code(keycode) = key_event.physical_key {
         if keycode == KeyCode::Escape && pressed {
@@ -2357,16 +2543,20 @@ fn handle_keyboard_input(
             framework.handle_exit(emulator, record_path);
             return true;
         }
-        // Custom keymap (Input Mapping window) takes precedence over presets
+        // Feed the real-time input debugger (always, even when egui has focus)
         if let Some(button) =
-            frontend::custom_button_for_key(keycode, &framework.gui_state.custom_keymap)
+            frontend::resolve_button_for_keycode(keycode, &framework.gui_state.custom_keymap, emulator.input_mapping)
         {
-            input.p1.set_button(button, pressed);
-            handled = true;
-        } else if let Some((button, _)) =
-            frontend::keycode_to_button(keycode, emulator.input_mapping)
+            framework.gui_state.input_debugger.set(&button, pressed);
+        }
+        if framework.egui_ctx.wants_keyboard_input() {
+            return false;
+        }
+        // Apply to emulation input
+        if let Some(button) =
+            frontend::resolve_button_for_keycode(keycode, &framework.gui_state.custom_keymap, emulator.input_mapping)
         {
-            input.p1.set_button(button, pressed);
+            input.p1.set_button(&button, pressed);
             handled = true;
         }
     }
@@ -2384,7 +2574,10 @@ fn handle_keyboard_input(
                 _ => None,
             };
             if let Some(btn) = button {
-                input.p1.set_button(btn, pressed);
+                framework.gui_state.input_debugger.set(btn, pressed);
+                if !framework.egui_ctx.wants_keyboard_input() {
+                    input.p1.set_button(btn, pressed);
+                }
             }
         }
     }
